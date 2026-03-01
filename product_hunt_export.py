@@ -86,10 +86,16 @@ def fetch_page(
     cursor: str | None,
     order: str,
 ) -> dict:
-    """Execute one GraphQL request with retry/back-off on transient errors."""
-    variables = {"first": page_size, "after": cursor, "order": order}
+    """Execute one GraphQL request with retry/back-off on transient errors.
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    429 rate-limit responses are retried indefinitely (honouring Retry-After)
+    and do NOT count against MAX_RETRIES.  Only network errors and other HTTP
+    failures consume retry attempts.
+    """
+    variables = {"first": page_size, "after": cursor, "order": order}
+    attempt = 0
+
+    while True:
         try:
             resp = session.post(
                 API_URL,
@@ -97,7 +103,8 @@ def fetch_page(
                 timeout=30,
             )
         except requests.RequestException as exc:
-            if attempt == MAX_RETRIES:
+            attempt += 1
+            if attempt >= MAX_RETRIES:
                 raise SystemExit(f"Network error after {MAX_RETRIES} attempts: {exc}") from exc
             wait = 2 ** attempt
             print(f"  [retry {attempt}/{MAX_RETRIES}] network error, waiting {wait}s …", file=sys.stderr)
@@ -105,6 +112,7 @@ def fetch_page(
             continue
 
         if resp.status_code == 429:
+            # Rate-limited: wait and retry without consuming an attempt.
             wait = int(resp.headers.get("Retry-After", 60))
             print(f"  [rate-limited] waiting {wait}s …", file=sys.stderr)
             time.sleep(wait)
@@ -117,7 +125,8 @@ def fetch_page(
             )
 
         if not resp.ok:
-            if attempt == MAX_RETRIES:
+            attempt += 1
+            if attempt >= MAX_RETRIES:
                 raise SystemExit(
                     f"API returned HTTP {resp.status_code} after {MAX_RETRIES} attempts.\n"
                     f"Body: {resp.text[:500]}"
@@ -136,8 +145,6 @@ def fetch_page(
             raise SystemExit(f"GraphQL error(s): {errors}")
 
         return data
-
-    raise SystemExit("Unexpected exit from retry loop.")
 
 
 def format_date(iso: str | None) -> str:

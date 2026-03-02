@@ -88,12 +88,13 @@ def fetch_page(
 ) -> dict:
     """Execute one GraphQL request with retry/back-off on transient errors.
 
-    429 rate-limit responses are retried indefinitely (honouring Retry-After)
+    429 rate-limit responses are retried indefinitely with exponential backoff
     and do NOT count against MAX_RETRIES.  Only network errors and other HTTP
     failures consume retry attempts.
     """
     variables = {"first": page_size, "after": cursor, "order": order}
     attempt = 0
+    rate_limit_count = 0
 
     while True:
         try:
@@ -112,9 +113,14 @@ def fetch_page(
             continue
 
         if resp.status_code == 429:
-            # Rate-limited: wait and retry without consuming an attempt.
-            wait = int(resp.headers.get("Retry-After", 60))
-            print(f"  [rate-limited] waiting {wait}s …", file=sys.stderr)
+            # Rate-limited: exponential backoff, does not consume attempt budget.
+            rate_limit_count += 1
+            base_wait = int(resp.headers.get("Retry-After", 60))
+            wait = min(base_wait * (2 ** (rate_limit_count - 1)), 900)  # cap at 15 min
+            print(
+                f"  [rate-limited #{rate_limit_count}] waiting {wait}s …",
+                file=sys.stderr,
+            )
             time.sleep(wait)
             continue
 

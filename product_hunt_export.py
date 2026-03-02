@@ -38,7 +38,7 @@ DEFAULT_PAGE_SIZE = 20   # Max the API reliably allows per page
 DEFAULT_DELAY = 1.0      # Seconds between requests (be a good API citizen)
 MAX_RETRIES = 5
 
-CSV_HEADERS = ["name", "makers", "website", "launch_date", "tagline", "featured_at"]
+CSV_HEADERS = ["name", "maker_first_name", "maker_last_name", "website", "launch_date", "tagline", "featured_at"]
 
 # ── GraphQL query ─────────────────────────────────────────────────────────────
 
@@ -165,13 +165,19 @@ def format_date(iso: str | None) -> str:
 
 
 def row_from_node(node: dict) -> dict:
-    makers = "; ".join(m["name"] for m in node.get("makers") or [])
+    makers = node.get("makers") or []
+    first_maker_name = makers[0]["name"] if makers else ""
+    name_parts = first_maker_name.split(" ", 1)
+    maker_first = name_parts[0] if name_parts else ""
+    maker_last = name_parts[1] if len(name_parts) > 1 else ""
+
     launch_date = format_date(node.get("featuredAt") or node.get("createdAt"))
     featured_at = format_date(node.get("featuredAt"))
 
     return {
         "name": node.get("name", ""),
-        "makers": makers,
+        "maker_first_name": maker_first,
+        "maker_last_name": maker_last,
         "website": node.get("website", ""),
         "launch_date": launch_date,
         "tagline": node.get("tagline", ""),

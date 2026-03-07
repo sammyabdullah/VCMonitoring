@@ -40,6 +40,19 @@ def resolve(url: str, timeout: int, session: requests.Session) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+
+    # Product Hunt redirect URLs (producthunt.com/r/...) block automated
+    # redirect-following. Grab the Location header from the first hop instead —
+    # it contains the real destination before PH can intercept.
+    if "producthunt.com/r/" in url:
+        try:
+            resp = session.get(url, timeout=timeout, allow_redirects=False)
+            location = resp.headers.get("Location", "")
+            if location and "producthunt.com" not in location:
+                return location
+        except Exception:
+            pass  # fall through to normal resolution below
+
     try:
         resp = session.get(url, timeout=timeout, allow_redirects=True)
         return resp.url

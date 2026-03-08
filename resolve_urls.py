@@ -15,6 +15,7 @@ import csv
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin
 
 import requests
 
@@ -41,17 +42,27 @@ def resolve(url: str, timeout: int, session: requests.Session) -> str:
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
 
-    # Product Hunt redirect URLs (producthunt.com/r/...) block automated
-    # redirect-following. Grab the Location header from the first hop instead —
-    # it contains the real destination before PH can intercept.
+    # Product Hunt redirect URLs (producthunt.com/r/...) use a multi-hop chain
+    # and block shared-session requests via cookie fingerprinting.
+    # Walk the chain hop-by-hop with a clean session until we land off PH.
     if "producthunt.com/r/" in url:
-        try:
-            resp = session.get(url, timeout=timeout, allow_redirects=False)
+        clean = requests.Session()
+        clean.headers.update(HEADERS)
+        current = url
+        for _ in range(10):
+            try:
+                resp = clean.get(current, timeout=timeout, allow_redirects=False)
+            except Exception:
+                break
             location = resp.headers.get("Location", "")
-            if location and "producthunt.com" not in location:
+            if not location:
+                break
+            if not location.startswith("http"):
+                location = urljoin(current, location)
+            if "producthunt.com" not in location:
                 return location
-        except Exception:
-            pass  # fall through to normal resolution below
+            current = location
+        # fall through to normal resolution if chain didn't escape PH
 
     try:
         resp = session.get(url, timeout=timeout, allow_redirects=True)

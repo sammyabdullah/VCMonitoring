@@ -32,7 +32,9 @@ import csv
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urljoin
 
 import requests
 
@@ -46,6 +48,14 @@ MAX_RETRIES = 5
 PRODUCT_HUNT_EPOCH = date(2013, 11, 1)  # Product Hunt's founding date
 
 CSV_HEADERS = ["name", "maker_first_name", "maker_last_name", "website", "launch_date", "tagline", "featured_at"]
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
+RESOLVE_WORKERS = 10
+RESOLVE_TIMEOUT = 10
 
 # ── GraphQL query ─────────────────────────────────────────────────────────────
 
@@ -85,6 +95,48 @@ query FetchPosts(
 """
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _resolve_url(url: str) -> str:
+    """Follow redirects on a PH tracking URL and return the final destination."""
+    if not url or not url.strip():
+        return url
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    if "producthunt.com/r/" in url:
+        clean = requests.Session()
+        clean.headers.update({"User-Agent": _BROWSER_UA})
+        current = url
+        for _ in range(10):
+            try:
+                resp = clean.get(current, timeout=RESOLVE_TIMEOUT, allow_redirects=False)
+            except Exception:
+                break
+            location = resp.headers.get("Location", "")
+            if not location:
+                break
+            if not location.startswith("http"):
+                location = urljoin(current, location)
+            if "producthunt.com" not in location:
+                return location
+            current = location
+        # Fell through without escaping PH — return whatever we last landed on
+        return current
+
+    return url
+
+
+def _resolve_rows(rows: list[dict]) -> list[dict]:
+    """Resolve website URLs for a batch of rows in parallel."""
+    urls = [r["website"] for r in rows]
+    resolved = [None] * len(urls)
+    with ThreadPoolExecutor(max_workers=RESOLVE_WORKERS) as pool:
+        futures = {pool.submit(_resolve_url, url): i for i, url in enumerate(urls)}
+        for future in as_completed(futures):
+            resolved[futures[future]] = future.result()
+    return [{**row, "website": resolved[i]} for i, row in enumerate(rows)]
 
 
 def build_session(token: str) -> requests.Session:
@@ -234,6 +286,7 @@ def fetch_window(
     end: date,
     writer: csv.DictWriter,
     csv_file,
+    resolve_urls: bool = True,
 ) -> int:
     """Paginate through one date window and write rows. Returns count written."""
     posted_after  = date_to_iso(start)
@@ -263,6 +316,9 @@ def fetch_window(
         if args.limit > 0:
             remaining = args.limit - window_written
             rows = rows[:remaining]
+
+        if resolve_urls:
+            rows = _resolve_rows(rows)
 
         writer.writerows(rows)
         csv_file.flush()
@@ -305,6 +361,8 @@ def parse_args() -> argparse.Namespace:
                         help="Sort order for iterating posts.")
     parser.add_argument("--limit", type=int, default=0,
                         help="Stop after this many posts per window (0 = no limit).")
+    parser.add_argument("--no-resolve-urls", action="store_true", default=False,
+                        help="Skip resolving PH redirect URLs; write raw API URLs instead.")
 
     # Date range options
     date_group = parser.add_argument_group("date range (pick one approach)")
@@ -339,9 +397,12 @@ def main() -> None:
         end   = date.fromisoformat(args.end_date)   if args.end_date   else today
         windows = [(start, end)]
 
-    print(f"Output file : {args.output}")
-    print(f"Page size   : {args.first}")
-    print(f"Order       : {args.order}")
+    resolve_urls = not args.no_resolve_urls
+
+    print(f"Output file   : {args.output}")
+    print(f"Page size     : {args.first}")
+    print(f"Order         : {args.order}")
+    print(f"Resolve URLs  : {resolve_urls}")
     print()
 
     session = build_session(args.token)
@@ -354,7 +415,7 @@ def main() -> None:
         for i, (start, end) in enumerate(windows, 1):
             label = f"Batch {i}/{len(windows)}" if len(windows) > 1 else "Fetching"
             print(f"── {label}: {start} → {end} ──")
-            count = fetch_window(session, args, start, end, writer, csv_file)
+            count = fetch_window(session, args, start, end, writer, csv_file, resolve_urls=resolve_urls)
             grand_total += count
             print(f"   Batch done: {count:,} posts  (running total: {grand_total:,})\n")
 
